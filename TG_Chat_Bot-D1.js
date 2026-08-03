@@ -988,9 +988,11 @@ async function markDelivered(env, chatId, messageId) {
 }
 
 // --- 12. 资料卡 ---
+// --- 12. 资料卡 (防弹修复版) ---
 async function sendInfoCardToTopic(env, u, tgUser, tid, date) {
   const meta = getUMeta(tgUser, u, date || Date.now() / 1000);
   try {
+    // 第一次尝试：原汁原味带上所有按钮发送
     const card = await api(env.BOT_TOKEN, "sendMessage", {
       chat_id: env.ADMIN_GROUP_ID,
       message_thread_id: tid,
@@ -1001,8 +1003,26 @@ async function sendInfoCardToTopic(env, u, tgUser, tid, date) {
     await updUser(u.user_id, { user_info: { card_msg_id: card.message_id } }, env);
     api(env.BOT_TOKEN, "pinChatMessage", { chat_id: env.ADMIN_GROUP_ID, message_id: card.message_id, message_thread_id: tid }).catch(() => {});
     return card.message_id;
-  } catch {
-    return null;
+  } catch (e) {
+    // 🚨 触发降级：如果因为隐私设置报错，直接拔掉【主页】按钮重发！
+    try {
+      const fallbackBtns = getBtns(u.user_id, u.is_blocked);
+      // 移除惹祸的第一排 [👤 主页] 按钮
+      fallbackBtns.inline_keyboard.shift(); 
+      
+      const card = await api(env.BOT_TOKEN, "sendMessage", {
+        chat_id: env.ADMIN_GROUP_ID,
+        message_thread_id: tid,
+        text: meta.card,
+        parse_mode: "HTML",
+        reply_markup: fallbackBtns
+      });
+      await updUser(u.user_id, { user_info: { card_msg_id: card.message_id } }, env);
+      api(env.BOT_TOKEN, "pinChatMessage", { chat_id: env.ADMIN_GROUP_ID, message_id: card.message_id, message_thread_id: tid }).catch(() => {});
+      return card.message_id;
+    } catch (fallbackErr) {
+      return null;
+    }
   }
 }
 
