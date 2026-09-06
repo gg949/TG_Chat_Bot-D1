@@ -844,7 +844,7 @@ async function relayToTopic(msg, u, env, ctx) {
     if (!CACHE.locks.has(dk)) {
       CACHE.locks.add(dk);
       setTimeout(() => CACHE.locks.delete(dk), 20000);
-      markDelivered(env, uid, msg.message_id);
+      await markDelivered(env, uid, msg.message_id); // ✅ 补上 await，杜绝被 Worker 冻结
     }
 
     if (msg.text) {
@@ -859,7 +859,26 @@ async function relayToTopic(msg, u, env, ctx) {
       maybeCleanupMessages(env, ctx);
     }
 
-    await Promise.all([handleInbox(env, msg, u, tid, uMeta), handleBackup(msg, uMeta, env)]);
+    try {
+  await handleInbox(env, msg, u, tid, uMeta);
+} catch (inboxErr) {
+  console.error("handleInbox Execution Error:", inboxErr);
+}
+try {
+  await handleBackup(msg, uMeta, env);
+} catch {}
+  }
+}
+async function markDelivered(env, chatId, messageId) {
+  try {
+    await api(env.BOT_TOKEN, "setMessageReaction", {
+      chat_id: chatId,
+      message_id: parseInt(messageId),
+      reaction: [{ type: "emoji", emoji: DELIVERED_REACTION }],
+      is_big: false
+    });
+  } catch (e) {
+    console.error("【贴送达表情失败】:", e?.message || e);
   }
 }
 // --- 12. 资料卡 (从 aa_2.txt 完美移植) ---
@@ -900,30 +919,37 @@ async function sendInfoCardToTopic(env, u, tgUser, tid, date) {
   }
 }
 
-// --- 13. 未读通知 (加固防掉线版) ---
+// --- 13. 未读通知 (还原备份逻辑 + 彻底修复版) ---
 async function handleInbox(env, msg, u, tid, uMeta) {
+  // 防抖降噪：3秒内同一用户只处理一次
   const lk = `inbox:${u.user_id}`;
   if (CACHE.locks.has(lk)) return;
   CACHE.locks.add(lk);
   setTimeout(() => CACHE.locks.delete(lk), 3000);
 
+  // 1. 读取话题 ID，不存在则直接建话题（与备份代码完全一致）
   let inboxId = await getCfg("unread_topic_id", env);
-  
-  // 如果数据库或缓存中没有，尝试创建并持久化保存
   if (!inboxId) {
     try {
-      const t = await api(env.BOT_TOKEN, "createForumTopic", { chat_id: env.ADMIN_GROUP_ID, name: "🔔 未读消息" });
+      const t = await api(env.BOT_TOKEN, "createForumTopic", {
+        chat_id: env.ADMIN_GROUP_ID,
+        name: "🔔 未读消息"
+      });
       inboxId = t.message_thread_id.toString();
       await setCfg("unread_topic_id", inboxId, env);
     } catch (createErr) {
-      console.error("Create Inbox Topic Failed:", createErr);
+      console.error("创建未读话题失败:", createErr);
       return;
     }
   }
 
   const gid = env.ADMIN_GROUP_ID.toString().replace(/^-100/, "");
   const preview = msg.text ? (msg.text.length > 20 ? msg.text.substring(0, 20) + "..." : msg.text) : "[媒体消息]";
-  const cardText = `<b>🔔 新消息</b>\n${uMeta.card}\n📝 <b>预览:</b> ${escapeHTML(preview)}`;
+  
+  // 保底容错：确保 card 文本存在，绝不发空消息
+  const cardInfo = (uMeta && uMeta.card) ? uMeta.card : `🆔: <code>${u.user_id}</code>`;
+  const cardText = `<b>🔔 新消息</b>\n${cardInfo}\n📝 <b>预览:</b> ${escapeHTML(preview)}`;
+  
   const kb = {
     inline_keyboard: [[
       { text: "🚀 直达回复", url: `https://t.me/c/${gid}/${tid}` },
@@ -932,8 +958,8 @@ async function handleInbox(env, msg, u, tid, uMeta) {
   };
 
   try {
-    // 如果有历史未读消息卡片，优先尝试更新它
-    if (u.user_info.inbox_msg_id) {
+    // 2. 如果存在旧卡片，优先更新旧卡片
+    if (u.user_info && u.user_info.inbox_msg_id) {
       try {
         await api(env.BOT_TOKEN, "editMessageText", {
           chat_id: env.ADMIN_GROUP_ID,
@@ -945,13 +971,14 @@ async function handleInbox(env, msg, u, tid, uMeta) {
         });
         await updUser(u.user_id, { user_info: { last_notify: Date.now() } }, env);
         return;
-      } catch {
-        // 如果旧卡片已经被删除了，清空旧 ID，流转到下方发送新卡片
+      } catch (editErr) {
+        // 如果旧卡片已被删除，重置消息 ID，继续向下发送新消息
         await updUser(u.user_id, { user_info: { inbox_msg_id: null } }, env);
+        if (u.user_info) u.user_info.inbox_msg_id = null;
       }
     }
 
-    // 发送新的未读卡片
+    // 3. 发送新未读提醒卡片
     const nm = await api(env.BOT_TOKEN, "sendMessage", {
       chat_id: env.ADMIN_GROUP_ID,
       message_thread_id: inboxId,
@@ -959,18 +986,17 @@ async function handleInbox(env, msg, u, tid, uMeta) {
       parse_mode: "HTML",
       reply_markup: kb
     });
-    if (nm?.message_id) {
+    if (nm && nm.message_id) {
       await updUser(u.user_id, { user_info: { last_notify: Date.now(), inbox_msg_id: nm.message_id } }, env);
     }
   } catch (e) {
-    console.error("Send Inbox Card Failed:", e);
-    // 只有明确遇到话题彻底不存在的错误时，才清空话题 ID 以便下次重建
-    if (e.message && (e.message.includes("thread not found") || e.message.includes("TOPIC_DELETED") || e.message.includes("message thread not found"))) {
+    console.error("未读通知发送失败:", e);
+    // 4. 关键自愈：如果话题在群里被手动删除了（报错包含 thread），立刻清空 ID，下次来消息自动新建！
+    if (e.message && e.message.includes("thread")) {
       await setCfg("unread_topic_id", "", env);
     }
   }
 }
-
 // --- 14. 黑名单/备份 ---
 async function manageBlacklist(env, u, tgUser, isBlocking) {
   let bid = await getCfg("blocked_topic_id", env);
