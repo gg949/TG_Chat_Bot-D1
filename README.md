@@ -98,7 +98,7 @@
    - **数据库**：选择步骤一创建的数据库
 3. 保存设置
 
-### 步骤四：配置 Turnstile 验证
+### 步骤四：配置 Turnstile 验证（不要cf人机验证可跳过）
 1. 在 Cloudflare 侧边栏选择 **Turnstile → 添加站点**
 2. 填写配置：
    - **站点名称**：任意（如 `tg-bot-verification`）
@@ -107,7 +107,7 @@
 3. 创建后复制 **站点密钥 (Site Key)** 和 **密钥 (Secret Key)** 备用
 
 ### 步骤五：配置环境变量
-在 Worker 的 **设置 → 变量** 中，添加以下 **9 个必备变量**：
+在 Worker 的 **设置 → 变量** 中，添加以下 **9 个变量前5个必备后四个不要在线验证只用问答验证可不要**：
 
 | 变量名称 | 示例值 | 说明 |
 |----------|--------|------|
@@ -115,11 +115,12 @@
 | `ADMIN_IDS` | `123456,789012` | 管理员ID（多人用英文逗号分隔，**无空格**） |
 | `ADMIN_GROUP_ID` | `-100123456789` | 开启话题的超级群组 ID |
 | `WORKER_URL` | `https://xxx.workers.dev` | Worker 完整访问链接（**不带末尾斜杠**） |
+| `TELEGRAM_WEBHOOK_SECRET` | `mRD0p7...` | 生成随机字符即可 |
 | `TURNSTILE_SITE_KEY` | `0x4AAAA...` | 步骤四获取的 Turnstile 站点密钥 |
 | `TURNSTILE_SECRET_KEY` | `0x4AAAA...` | 步骤四获取的 Turnstile 密钥 |
 | `RECAPTCHA_SITE_KEY` | `6LAAAAABBCCDDBGHYDD_cDmgjUtEbpF` | [Google reCAPTCHA v2](https://www.google.com/recaptcha/admin) 站点密钥 |
 | `RECAPTCHA_SECRET_KEY` | `6LAAAAABDDCCFGTTH-AIMK6z-H4aE` | [Google reCAPTCHA v2](https://www.google.com/recaptcha/admin) 密钥 |
-| `TELEGRAM_WEBHOOK_SECRET` | `mRD0p7...` | 生成随机字符即可 |
+
 
 > ⚠️ **重要**：  
 > - Google reCAPTCHA 需自行在 [Google reCAPTCHA Admin Console](https://www.google.com/recaptcha/admin) 创建（选择 **v2 Checkbox** 类型）
